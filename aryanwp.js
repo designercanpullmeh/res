@@ -410,7 +410,7 @@ Subadmins: ${subsLabel}
                     break;
 
                 case '/help':
-                    await sock.sendMessage(from, { text: `FIGHT BOT 🎯 Commands:
+                    await sock.sendMessage(from, { text: `FIGHT BOT2 🎯 Commands:
 /spam <msg>           Start spam
 /stopspam             Stop spam
 /setdelay <sec>       Set spam delay (per group)

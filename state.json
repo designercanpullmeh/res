@@ -1,12 +1,18 @@
 {
-  "spamStates": {},
+  "spamStates": {
+    "120363423640022194@g.us": {
+      "sharedDelay": 700,
+      "spamDelayMs": 7000,
+      "spamText": ""
+    }
+  },
   "ncStates": {
     "120363423640022194@g.us": {
       "isRenaming": true,
       "renameList": [
-        "DAKSH HENTAI GIRL"
+        "DUCK CHOCLATE GIRL"
       ],
-      "ncDelayMs": 700
+      "sharedDelay": 700
     }
   }
 }
