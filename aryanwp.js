@@ -23,13 +23,13 @@ let botState = {
   spamStates: {
     "120363400140211782@g.us": {
       isSpamming: true,
-      spamText: "\n SHOOTER/CHUTER/FOTTER / SHARAN BHENGE LUN CHUS BADA HO",
+      spamText: "\n CHUDI CHUDI SHOOTER KI MAA CHUDI 🦆",
       spamDelayMs: 8000
     },
     "120363422007741000@g.us": {
       isSpamming: false,
       spamText: "",
-      spamDelayMs: 8000
+      spamDelayMs: 10000
     }
   },
   ncStates: {
