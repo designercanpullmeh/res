@@ -609,4 +609,64 @@ SHARAN-RAHUL-USKE TATTE LUN CHUS 💜',
               target = ensureJid(target);
               config.subadmins = config.subadmins.filter(x => x !== target);
               saveConfig();
-              await sock.sendMessage(from, {
+              await sock.sendMessage(from, { text: 'Subadmin removed.', ...quoted });
+              break;
+            }
+
+            case '/help': {
+              await sock.sendMessage(
+                from,
+                {
+                  text:
+                    'FIGHT BOT 🎯
+
+' +
+                    '/spam Start spam
+' +
+                    '/stopspam Stop spam
+' +
+                    '/setdelay Set spam delay (per group)
+' +
+                    '/startnc Start group name cycling
+' +
+                    '/stopnc Stop NC
+' +
+                    '/setncdelay Set NC delay (per group)
+' +
+                    '/status Show status
+' +
+                    '/restart Clear & reset to permanent state
+' +
+                    '/menu
+' +
+                    '/help
+'
+                },
+                quoted
+              );
+              break;
+            }
+          }
+        } catch (msgErr) {
+          console.error('Message processing error:', msgErr.message);
+        }
+      }
+    } catch (err) {
+      console.error('messages.upsert error:', err.message);
+    }
+  });
+
+  return sock;
+}
+
+connectBot();
+
+// --- Express server for Render keepalive ---
+const app = express();
+const PORT = process.env.PORT || 10000;
+
+app.get('/', (req, res) => res.send('Fight Bot online!'));
+app.get('/health', (req, res) => res.json({ status: 'ok', message: 'Fight Bot running.' }));
+app.listen(PORT, () => {
+  console.log(`[FightBot] HTTP server LIVE on port ${PORT}`);
+});
