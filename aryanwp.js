@@ -1,26 +1,42 @@
-const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, proto } = require('@whiskeysockets/baileys');
+const {
+  makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  proto
+} = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
 const express = require('express');
+const axios = require('axios');
+const { exec } = require('child_process'); // for yt-dlp
 
 const CONFIG_PATH = './config.json';
+// your own local music search API (server.js in Music folder)
+const MUSIC_API_BASE = 'http://localhost:3000';
 
 // --- Config (owner, subadmins) ---
 
 let config = { admin: '76656576352338@s.whatsapp.net', subadmins: [] };
 
-if (fs.existsSync(CONFIG_PATH)) config = JSON.parse(fs.readFileSync(CONFIG_PATH));
+if (fs.existsSync(CONFIG_PATH)) {
+  config = JSON.parse(fs.readFileSync(CONFIG_PATH));
+}
 
-function ensureJid(j) { if (!j) return j; return j.includes('@') ? j : `${j}@s.whatsapp.net`; }
+function ensureJid(j) {
+  if (!j) return j;
+  return j.includes('@') ? j : `${j}@s.whatsapp.net`;
+}
 
 config.admin = ensureJid(config.admin);
 config.subadmins = (config.subadmins || []).map(ensureJid);
 
-function saveConfig() { fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2)); }
+function saveConfig() {
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
 
-// --- In‑memory runtime state only (no permanent state) ---
+// --- In‑memory runtime state ONLY (no persistence) ---
 
 const groupStates = {};
 
@@ -45,12 +61,15 @@ function getStateFor(group) {
 
 // --- Helpers ---
 
-function normalizeBare(jid){ if(!jid) return ''; return jid.replace(/:\d+$/,'').replace(/@.*/,''); }
+function normalizeBare(jid) {
+  if (!jid) return '';
+  return jid.replace(/:\d+$/, '').replace(/@.*/, '');
+}
 
 function isAdminOrSub(sender) {
   const s = normalizeBare(sender);
   const adminBare = normalizeBare(config.admin);
-  const subsBare = (config.subadmins||[]).map(normalizeBare);
+  const subsBare = (config.subadmins || []).map(normalizeBare);
   return s === adminBare || subsBare.includes(s);
 }
 
@@ -60,7 +79,6 @@ function isOnlyAdmin(sender) {
   return s === adminBare;
 }
 
-// emoji pool
 const NC_EMOJI_BLOCKS = [
   '💥','🔥','⚔️','🥊','💣','👊','😈','💀','⚡','🛡️',
   '🏹','🧨','🚀','💫','⭐','🌟','✨','⚙️','🌀','💎',
@@ -79,8 +97,12 @@ async function connectBot() {
   const version = Array.isArray(latest) ? latest[0] : (latest.version || latest);
 
   if (proto && typeof proto === 'object') {
-    if (!proto.GroupStatusMessageV2 && proto.GroupStatusMessage) proto.GroupStatusMessageV2 = proto.GroupStatusMessage;
-    if (!proto.Message && proto.IMessage) proto.Message = proto.IMessage;
+    if (!proto.GroupStatusMessageV2 && proto.GroupStatusMessage) {
+      proto.GroupStatusMessageV2 = proto.GroupStatusMessage;
+    }
+    if (!proto.Message && proto.IMessage) {
+      proto.Message = proto.IMessage;
+    }
   }
 
   const sock = makeWASocket({
@@ -98,86 +120,134 @@ async function connectBot() {
       console.log('FIGHT BOT connected 🎯');
     }
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) connectBot();
     }
   });
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg?.message || msg.key.fromMe) return;
 
     const from = msg.key.remoteJid;
     const isGroup = from?.endsWith?.('@g.us');
     const sender = msg.key.participant || msg.key.remoteJid;
-    const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    const body =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      '';
     const isCommand = typeof body === 'string' && body.startsWith('/');
     const command = isCommand ? body.split(' ')[0].toLowerCase() : '';
-    const args = isCommand ? body.split(' ').slice(1).join(' ') : '';
-    const mentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    const quoted = { quoted: { key: { remoteJid: from, id: msg.key.id, fromMe: msg.key.fromMe, participant: msg.key.participant || undefined }, message: msg.message } };
+    const argsRaw = isCommand ? body.split(' ').slice(1) : [];
+    const q = argsRaw.join(' ');
+    const mentioned =
+      msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const quoted = {
+      quoted: {
+        key: {
+          remoteJid: from,
+          id: msg.key.id,
+          fromMe: msg.key.fromMe,
+          participant: msg.key.participant || undefined
+        },
+        message: msg.message
+      }
+    };
     const st = getStateFor(from);
 
-    // --- PUBLIC COMMAND: /ytmp3 (song title search, no admin check) ---
+    // --- PUBLIC MUSIC COMMAND: /song using your own Music API + yt-dlp ---
 
-    if (isCommand && command === '/ytmp3') {
-      if (!args) {
-        await sock.sendMessage(from, { text: 'Use: /ytmp3 <song name>', ...quoted });
+    if (isCommand && command === '/song') {
+      const songName = q;
+      if (!songName) {
+        await sock.sendMessage(from, {
+          text: 'Usage: /song songname',
+          ...quoted
+        });
         return;
       }
-
-      const query = args.trim(); // e.g. "/ytmp3 darling"
 
       const outDir = path.join(__dirname, 'downloads');
       if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
-      await sock.sendMessage(from, { text: `Searching & downloading: ${query}`, ...quoted });
+      await sock.sendMessage(from, {
+        text: `Searching : ${songName} ...`,
+        ...quoted
+      });
 
-      // yt-dlp: search top 1 video for query, extract audio mp3. [web:6][web:39]
-      const cmd = `yt-dlp -x --audio-format mp3 -o "${outDir}/%(title)s.%(ext)s" "ytsearch1:${query}"`;
+      try {
+        // 1) Ask your local Music API for best video (JSON: { title, url })
+        const apiUrl = `${MUSIC_API_BASE}/song?q=${encodeURIComponent(songName)}`;
+        const { data } = await axios.get(apiUrl);
 
-      exec(cmd, async (error, stdout, stderr) => {
-        if (error) {
-          console.error('yt-dlp error:', error);
-          await sock.sendMessage(from, { text: 'Failed to download audio (maybe no results).', ...quoted });
+        if (!data || !data.url) {
+          await sock.sendMessage(from, {
+            text: 'Song not found from Music API.',
+            ...quoted
+          });
           return;
         }
 
-        try {
-          const files = fs.readdirSync(outDir)
-            .filter(f => f.toLowerCase().endsWith('.mp3'))
-            .map(f => ({
-              name: f,
-              time: fs.statSync(path.join(outDir, f)).mtimeMs
-            }))
-            .sort((a, b) => b.time - a.time);
+        const videoUrl = data.url;
+        const title = data.title || songName;
+        const safeTitle = String(title).replace(/[<>:"/\\|?*]+/g, '_');
+        const outPath = path.join(outDir, `${Date.now()}_${safeTitle}.mp3`);
 
-          if (!files.length) {
-            await sock.sendMessage(from, { text: 'Audio file not found after download.', ...quoted });
+        // 2) Run yt-dlp to get mp3
+        const cmd = `yt-dlp -x --audio-format mp3 -o "${outPath}" "${videoUrl}"`;
+
+        exec(cmd, async (err, stdout, stderr) => {
+          if (err) {
+            console.error('yt-dlp error:', err, stderr);
+            await sock.sendMessage(from, {
+              text: 'Error while loading audio.',
+              ...quoted
+            });
             return;
           }
 
-          const latest = path.join(outDir, files[0].name);
-
-          await sock.sendMessage(from, {
-            audio: { url: latest },
-            mimetype: 'audio/mpeg'
-          }, quoted); // send mp3 as WhatsApp audio. [web:13][web:26]
-
-        } catch (err) {
-          console.error('file send error:', err);
-          await sock.sendMessage(from, { text: 'Error while sending audio.', ...quoted });
-        }
-      });
+          try {
+            await sock.sendMessage(
+              from,
+              {
+                audio: { url: outPath },
+                mimetype: 'audio/mpeg',
+                fileName: `${safeTitle}.mp3`
+              },
+              quoted
+            );
+          } catch (sendErr) {
+            console.error('Send audio error:', sendErr);
+            await sock.sendMessage(from, {
+              text: 'Error while sending audio.',
+              ...quoted
+            });
+          } finally {
+            fs.unlink(outPath, err2 => {
+              if (err2) console.error('Delete error:', err2);
+            });
+          }
+        });
+      } catch (e) {
+        console.error('Music API error:', e?.response?.data || e);
+        await sock.sendMessage(from, {
+          text: 'Song API error.',
+          ...quoted
+        });
+      }
 
       return;
     }
 
-    // --- ADMIN / OWNER / SUBADMIN COMMANDS (everything except /ytmp3) ---
+    // --- OWNER / SUBADMIN COMMANDS (no persistence) ---
 
     if (isCommand && !isAdminOrSub(sender)) {
-      if (command !== '/ytmp3') {
-        await sock.sendMessage(from, { text: 'Only owner/subadmins can use this command.', ...quoted });
+      if (command !== '/song') {
+        await sock.sendMessage(from, {
+          text: 'Only owner/subadmins can use this command.',
+          ...quoted
+        });
       }
       return;
     }
@@ -187,7 +257,6 @@ async function connectBot() {
         case '/menu': {
           const text = `🎯 FIGHT BOT MENU 🛡️
 
-/start
 /spam
 /stopspam
 /setdelay
@@ -195,7 +264,9 @@ async function connectBot() {
 /stopnc
 /setncdelay
 /status
-/ytmp3
+/song
+/addsubadmin
+/removesubadmin
 /help
 `;
           const mentions = [config.admin, ...config.subadmins];
@@ -204,12 +275,20 @@ async function connectBot() {
         }
 
         case '/status': {
-          const ownerLabel = `@${config.admin.replace('@s.whatsapp.net','')}`;
-          const subsLabel = config.subadmins.length ? config.subadmins.map(j => `@${j.replace('@s.whatsapp.net','')}`).join(' ') : 'None';
+          const ownerLabel = `@${config.admin.replace('@s.whatsapp.net', '')}`;
+          const subsLabel = config.subadmins.length
+            ? config.subadmins
+                .map(j => `@${j.replace('@s.whatsapp.net', '')}`)
+                .join(' ')
+            : 'None';
           const text = `🎯 *FIGHT BOT STATUS* 🥊
 
-Spam: ${st.isSpamming ? 'ON 🟢' : 'OFF 🔴'} (delay: ${st.spamDelayMs/1000}s)
-NC: ${st.isRenaming ? 'ON 🟢' : 'OFF 🔴'} (delay: ${st.ncDelayMs/1000}s)
+Spam: ${st.isSpamming ? 'ON 🟢' : 'OFF 🔴'} (delay: ${
+            st.spamDelayMs / 1000
+          }s)
+NC: ${st.isRenaming ? 'ON 🟢' : 'OFF 🔴'} (delay: ${
+            st.ncDelayMs / 1000
+          }s)
 Owner: ${ownerLabel}
 Subadmins: ${subsLabel}
 `;
@@ -219,9 +298,19 @@ Subadmins: ${subsLabel}
         }
 
         case '/setdelay': {
-          if (!args) { await sock.sendMessage(from, { text: 'Provide seconds (ex: /setdelay 0.3)', ...quoted }); break; }
+          const args = q;
+          if (!args) {
+            await sock.sendMessage(from, {
+              text: 'Provide seconds (ex: /setdelay 0.3)',
+              ...quoted
+            });
+            break;
+          }
           const sd = parseFloat(args);
-          if (isNaN(sd) || sd <= 0) { await sock.sendMessage(from, { text: 'Invalid value.', ...quoted }); break; }
+          if (isNaN(sd) || sd <= 0) {
+            await sock.sendMessage(from, { text: 'Invalid value.', ...quoted });
+            break;
+          }
           st.spamDelayMs = Math.max(50, Math.round(sd * 1000));
           if (st.isSpamming && st.spamInterval) {
             clearInterval(st.spamInterval);
@@ -229,142 +318,262 @@ Subadmins: ${subsLabel}
               sock.sendMessage(from, { text: st.spamText });
             }, st.spamDelayMs);
           }
-          await sock.sendMessage(from, { text: `Spam delay set to ${sd} seconds.`, ...quoted });
+          await sock.sendMessage(from, {
+            text: `Spam delay set to ${sd} seconds.`,
+            ...quoted
+          });
           break;
         }
 
         case '/setncdelay': {
-          if (!args) { await sock.sendMessage(from, { text: 'Provide seconds (ex: /setncdelay 0.7)', ...quoted }); break; }
+          const args = q;
+          if (!args) {
+            await sock.sendMessage(from, {
+              text: 'Provide seconds (ex: /setncdelay 0.7)',
+              ...quoted
+            });
+            break;
+          }
           const nd = parseFloat(args);
-          if (isNaN(nd) || nd <= 0) { await sock.sendMessage(from, { text: 'Invalid value.', ...quoted }); break; }
+          if (isNaN(nd) || nd <= 0) {
+            await sock.sendMessage(from, { text: 'Invalid value.', ...quoted });
+            break;
+          }
           st.ncDelayMs = Math.max(100, Math.round(nd * 1000));
 
           if (st.isRenaming && st.renameInterval) {
             clearTimeout(st.renameInterval);
             const runNc = async () => {
-              if (!st.isRenaming || !st.renameList || !st.renameList.length) return;
-              const base = st.renameList[st._ncIndex % st.renameList.length];
+              if (!st.isRenaming || !st.renameList || !st.renameList.length)
+                return;
+              const base =
+                st.renameList[st._ncIndex % st.renameList.length];
               const name = `${randomEmojiBlock()} ${base}`;
-              try { await sock.groupUpdateSubject(from, name); } catch {}
+              try {
+                await sock.groupUpdateSubject(from, name);
+              } catch {}
               st._ncIndex = (st._ncIndex + 1) || 1;
               st.renameInterval = setTimeout(runNc, st.ncDelayMs);
             };
             st.renameInterval = setTimeout(runNc, st.ncDelayMs);
           }
 
-          await sock.sendMessage(from, { text: `NC delay set to ${nd} seconds.`, ...quoted });
+          await sock.sendMessage(from, {
+            text: `NC delay set to ${nd} seconds.`,
+            ...quoted
+          });
           break;
         }
 
         case '/spam': {
-          if (!args) { await sock.sendMessage(from, { text: 'Provide text (/spam message)', ...quoted }); break; }
-          if (st.isSpamming) { await sock.sendMessage(from, { text: 'Spam is running.', ...quoted }); break; }
+          const args = q;
+          if (!args) {
+            await sock.sendMessage(from, {
+              text: 'Provide text (/spam message)',
+              ...quoted
+            });
+            break;
+          }
+          if (st.isSpamming) {
+            await sock.sendMessage(from, {
+              text: 'Spam is running.',
+              ...quoted
+            });
+            break;
+          }
           st.isSpamming = true;
           st.spamText = args;
           st.spamInterval = setInterval(() => {
             sock.sendMessage(from, { text: st.spamText });
           }, st.spamDelayMs);
-          await sock.sendMessage(from, { text: `Spam started 🥊 (delay ${st.spamDelayMs/1000}s).`, ...quoted });
+          await sock.sendMessage(from, {
+            text: `Spam started 🥊 (delay ${st.spamDelayMs / 1000}s).`,
+            ...quoted
+          });
           break;
         }
 
         case '/stopspam': {
-          if (!st.isSpamming) { await sock.sendMessage(from, { text: 'Spam not running.', ...quoted }); break; }
+          if (!st.isSpamming) {
+            await sock.sendMessage(from, {
+              text: 'Spam not running.',
+              ...quoted
+            });
+            break;
+          }
           clearInterval(st.spamInterval);
           st.isSpamming = false;
           st.spamInterval = null;
-          await sock.sendMessage(from, { text: 'Spam stopped 🛑.', ...quoted });
+          await sock.sendMessage(from, {
+            text: 'Spam stopped 🛑.',
+            ...quoted
+          });
           break;
         }
 
         case '/startnc': {
-          if (!isGroup) { await sock.sendMessage(from, { text: 'Use in group.', ...quoted }); break; }
-          if (st.isRenaming) { await sock.sendMessage(from, { text: 'NC already running.', ...quoted }); break; }
-          if (!args) { await sock.sendMessage(from, { text: 'Provide names: /startnc name1|name2|...', ...quoted }); break; }
+          const args = q;
+          if (!isGroup) {
+            await sock.sendMessage(from, {
+              text: 'Use in group.',
+              ...quoted
+            });
+            break;
+          }
+          if (st.isRenaming) {
+            await sock.sendMessage(from, {
+              text: 'NC already running.',
+              ...quoted
+            });
+            break;
+          }
+          if (!args) {
+            await sock.sendMessage(from, {
+              text: 'Provide names: /startnc name1|name2|...',
+              ...quoted
+            });
+            break;
+          }
 
           st.isRenaming = true;
-          st.renameList = args.includes('|') ? args.split('|').map(s => s.trim()).filter(Boolean) : [args];
+          st.renameList = args.includes('|')
+            ? args.split('|').map(s => s.trim()).filter(Boolean)
+            : args.split(' ').map(s => s.trim()).filter(Boolean);
           st._ncIndex = 0;
 
           const runNc = async () => {
-            if (!st.isRenaming || !st.renameList || !st.renameList.length) return;
-            const base = st.renameList[st._ncIndex % st.renameList.length];
+            if (!st.isRenaming || !st.renameList || !st.renameList.length)
+              return;
+            const base =
+              st.renameList[st._ncIndex % st.renameList.length];
             const name = `${randomEmojiBlock()} ${base}`;
-            try { await sock.groupUpdateSubject(from, name); } catch {}
+            try {
+              await sock.groupUpdateSubject(from, name);
+            } catch {}
             st._ncIndex = (st._ncIndex + 1) || 1;
             st.renameInterval = setTimeout(runNc, st.ncDelayMs);
           };
 
           st.renameInterval = setTimeout(runNc, st.ncDelayMs);
-          await sock.sendMessage(from, { text: `NC started 🥊 (delay ${st.ncDelayMs/1000}s).`, ...quoted });
+          await sock.sendMessage(from, {
+            text: `NC started 🥊 (delay ${st.ncDelayMs / 1000}s).`,
+            ...quoted
+          });
           break;
         }
 
         case '/stopnc': {
-          if (!st.isRenaming) { await sock.sendMessage(from, { text: 'No NC running.', ...quoted }); break; }
+          if (!st.isRenaming) {
+            await sock.sendMessage(from, {
+              text: 'No NC running.',
+              ...quoted
+            });
+            break;
+          }
           clearTimeout(st.renameInterval);
           st.isRenaming = false;
           st.renameInterval = null;
-          await sock.sendMessage(from, { text: 'NC stopped 🛑.', ...quoted });
+          await sock.sendMessage(from, {
+            text: 'NC stopped 🛑.',
+            ...quoted
+          });
           break;
         }
 
         case '/addsubadmin': {
-          if (!isOnlyAdmin(sender)) { await sock.sendMessage(from, { text: 'Only owner can add subadmins.', ...quoted }); break; }
+          const args = q;
+          if (!isOnlyAdmin(sender)) {
+            await sock.sendMessage(from, {
+              text: 'Only owner can add subadmins.',
+              ...quoted
+            });
+            break;
+          }
 
           let target;
           if (mentioned && mentioned.length > 0) target = mentioned[0];
           else if (args) {
-            const num = args.replace(/\D/g,'');
+            const num = args.replace(/\D/g, '');
             if (num) target = ensureJid(num);
           }
 
-          if (!target) { await sock.sendMessage(from, { text: 'Tag or provide number.', ...quoted }); break; }
+          if (!target) {
+            await sock.sendMessage(from, {
+              text: 'Tag or provide number.',
+              ...quoted
+            });
+            break;
+          }
           target = ensureJid(target);
 
           if (!config.subadmins.includes(target)) {
             config.subadmins.push(target);
             saveConfig();
-            await sock.sendMessage(from, { text: 'Subadmin added.', ...quoted });
+            await sock.sendMessage(from, {
+              text: 'Subadmin added.',
+              ...quoted
+            });
           } else {
-            await sock.sendMessage(from, { text: 'Already subadmin.', ...quoted });
+            await sock.sendMessage(from, {
+              text: 'Already subadmin.',
+              ...quoted
+            });
           }
           break;
         }
 
         case '/removesubadmin': {
-          if (!isOnlyAdmin(sender)) { await sock.sendMessage(from, { text: 'Only owner can remove subadmins.', ...quoted }); break; }
+          const args = q;
+          if (!isOnlyAdmin(sender)) {
+            await sock.sendMessage(from, {
+              text: 'Only owner can remove subadmins.',
+              ...quoted
+            });
+            break;
+          }
 
           let target;
           if (mentioned && mentioned.length > 0) target = mentioned[0];
           else if (args) {
-            const num = args.replace(/\D/g,'');
+            const num = args.replace(/\D/g, '');
             if (num) target = ensureJid(num);
           }
 
-          if (!target) { await sock.sendMessage(from, { text: 'Tag or provide number.', ...quoted }); break; }
+          if (!target) {
+            await sock.sendMessage(from, {
+              text: 'Tag or provide number.',
+              ...quoted
+            });
+            break;
+          }
           target = ensureJid(target);
 
           config.subadmins = config.subadmins.filter(x => x !== target);
           saveConfig();
-          await sock.sendMessage(from, { text: 'Subadmin removed.', ...quoted });
+          await sock.sendMessage(from, {
+            text: 'Subadmin removed.',
+            ...quoted
+          });
           break;
         }
 
         case '/help': {
-          await sock.sendMessage(from, { text: `FIGHT BOT1 🎯 Commands:
+          await sock.sendMessage(from, {
+            text: `FIGHT BOT 🎯 Commands:
 
 /spam - Start spam
 /stopspam - Stop spam
-/setdelay - Set spam delay (per group)
+/setdelay - Set spam delay
 /startnc - Start group name cycling
 /stopnc - Stop NC
-/setncdelay - Set NC delay (per group)
+/setncdelay - Set NC delay
 /status - Show status
-/ytmp3 - Download YouTube audio (mp3) from song name
+/song - Play song via Music API 
 /menu
 /help
-`, ...quoted });
+`,
+            ...quoted
+          });
           break;
         }
       }
@@ -376,13 +585,15 @@ Subadmins: ${subsLabel}
 
 connectBot();
 
-// --- Express Server for Render / keepalive ---
+// --- Express keepalive server (for Render/local health) ---
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => res.send('Fight Bot online!'));
-app.get('/health', (req, res) => res.json({status: 'ok', message: 'Fight Bot running.'}));
+app.get('/health', (req, res) =>
+  res.json({ status: 'ok', message: 'Fight Bot running.' })
+);
 
 app.listen(PORT, () => {
   console.log(`[FightBot] HTTP server LIVE on port ${PORT}`);
