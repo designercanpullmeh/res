@@ -13,8 +13,7 @@ const axios = require('axios');
 const { exec } = require('child_process'); // for yt-dlp
 
 const CONFIG_PATH = './config.json';
-// your own local music search API (server.js in Music folder)
-const MUSIC_API_BASE = 'http://localhost:3000';
+const MUSIC_API_BASE = 'https://music-api-enxn.onrender.com';
 
 // --- Config (owner, subadmins) ---
 
